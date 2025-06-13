@@ -1,5 +1,6 @@
 # meyda-viz
 Uses meydajs and threejs to create a live FFT visualizer in your browser.
+![example](https://github.com/mainframegremlin/meyda-viz/blob/main/assets/meyda-viz-example.gif?raw=true)
 
 # Getting started
 After cloning repository, build and run the container:
