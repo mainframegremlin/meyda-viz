@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>3D Waterfall FFT Visualizer with 3D Waveform</title>
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; background: #111; }
+    #audioDataOverlay {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: #111;
+      color: #00ff00;
+      font-family: monospace;
+      font-size: 13px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      z-index: 100;
+      pointer-events: none;
+      max-width: 75vw;
+      white-space: pre;
+    }
+  </style>
+</head>
+<body>
+  <div id="audioDataOverlay"></div>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/meyda/dist/web/meyda.min.js"></script>
+  <script>
+    // Three.js scene setup
+    const scene = new THREE.Scene(); // color above can be #00ff00 for green or #bd93f9 for purple (#audiodataoverlay section)
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 10, 30);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({antialias: true});
+    renderer.setClearColor(0x000000);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Mouse rotate/zoom/pan
+    let isRotating = false;
+    let isPanning = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+    let rotationY = 0;
+    let rotationX = 0;
+    let cameraRadius = 30;
+    let panOffsetY = 0;
+    let panOffsetX = 0;
+
+    // Waterfall parameters
+    const fftSize = 256;
+    const waterfallDepth = 32;
+    const lineSpacing = 3;
+    let amplitudeScale = 0.9;
+    const sensitivityBoost = 15;
+    const lines = [];
+    const geometryTemplate = new THREE.BufferGeometry();
+    const positions = new Float32Array(fftSize * 3);
+    geometryTemplate.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const lineMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 }); // green: 0x00ff00, purple: 0xb93f9
+
+    for (let i = 0; i < waterfallDepth; i++) {
+      const geo = geometryTemplate.clone();
+      const line = new THREE.Line(geo, lineMaterial.clone());
+      line.position.z = -i * lineSpacing;
+      scene.add(line);
+      lines.push(line);
+    }
+
+    // 3D waveform setup
+    const waveformResolution = fftSize * 2;
+    const waveformGeometry = new THREE.BufferGeometry();
+    const waveformPositions = new Float32Array(waveformResolution * 3);
+    waveformGeometry.setAttribute('position', new THREE.BufferAttribute(waveformPositions, 3));
+    const waveformMaterial = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+    const waveformLine = new THREE.Line(waveformGeometry, waveformMaterial);
+
+    const waveformBaseY = -5;
+    const waveformBaseX = 0;
+    waveformLine.position.set(waveformBaseX, waveformBaseY, 1);
+    scene.add(waveformLine);
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Meyda and audio setup
+    let audioContext, source, analyzer;
+    let lastFFT = new Float32Array(fftSize);
+    let lastBuffer = new Float32Array(waveformResolution);
+
+    // Dynamic sens. logic
+    let maxAmplitude = 0.2;
+    const maxHistory = [];
+    const maxHistoryLength = 60;
+
+    function updateMaxAmplitude(newData) {
+      let frameMax = 0;
+      for (let i = 0; i < newData.length; i++) {
+        frameMax = Math.max(frameMax, Math.abs(newData[i]));
+      }
+      maxHistory.push(frameMax);
+      if (maxHistory.length > maxHistoryLength) maxHistory.shift();
+      maxAmplitude = Math.max(...maxHistory, 0.01);
+    }
+
+    // Mouse events for rotate/pan
+    renderer.domElement.addEventListener('mousedown', (e) => {
+      if (e.button === 0) { isRotating = true; lastMouseX = e.clientX; lastMouseY = e.clientY; e.preventDefault(); }
+      if (e.button === 1) { isPanning = true; lastMouseX = e.clientX; lastMouseY = e.clientY; e.preventDefault(); }
+    });
+    renderer.domElement.addEventListener('mouseup', (e) => {
+      if (e.button === 0) { isRotating = false; e.preventDefault(); }
+      if (e.button === 1) { isPanning = false; e.preventDefault(); }
+    });
+    renderer.domElement.addEventListener('mouseleave', () => { isRotating = false; isPanning = false; });
+    renderer.domElement.addEventListener('mousemove', (e) => {
+      if (isRotating) {
+        const dx = e.clientX - lastMouseX;
+        const dy = e.clientY - lastMouseY;
+        rotationY += dx * 0.01;
+        rotationX += dy * 0.01;
+        rotationX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, rotationX));
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+      }
+      if (isPanning) {
+        const dx = e.clientX - lastMouseX;
+        const dy = e.clientY - lastMouseY;
+        panOffsetX += dx * 0.05;
+        panOffsetY += dy * 0.05;
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+      }
+    });
+    renderer.domElement.addEventListener('contextmenu', (e) => { e.preventDefault(); });
+    renderer.domElement.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      cameraRadius += event.deltaY * 0.05;
+      cameraRadius = Math.max(5, Math.min(100, cameraRadius));
+    }, { passive: false });
+
+    async function startAudio() {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      source = audioContext.createMediaStreamSource(stream);
+
+      analyzer = Meyda.createMeydaAnalyzer({
+        audioContext,
+        source,
+        bufferSize: fftSize * 2,
+        featureExtractors: ['amplitudeSpectrum', 'buffer'],
+        callback: features => {
+          lastFFT = features.amplitudeSpectrum;
+          lastBuffer = features.buffer;
+          updateMaxAmplitude(lastFFT);
+          updateMaxAmplitude(lastBuffer);
+        }
+      });
+      analyzer.start();
+    }
+
+    function updateWaterfall() {
+      for (let i = lines.length - 1; i > 0; i--) {
+        lines[i].geometry.attributes.position.copy(lines[i-1].geometry.attributes.position);
+        lines[i].geometry.attributes.position.needsUpdate = true;
+      }
+      const frontLine = lines[0];
+      const pos = frontLine.geometry.attributes.position;
+      const minLog = Math.log10(1);
+      const maxLog = Math.log10(fftSize);
+      for (let i = 0; i < fftSize; i++) {
+        const logIndex = Math.log10(i + 1);
+        const x = ((logIndex - minLog) / (maxLog - minLog) - 0.5) * fftSize * 0.3; // was 0.2
+        const normY = lastFFT ? (lastFFT[i] / maxAmplitude) * amplitudeScale * sensitivityBoost : 0;
+        pos.setXYZ(i, x, normY, 0);
+      }
+      pos.needsUpdate = true;
+    }
+
+    function updateWaveform3D(buffer) {
+      const positions = waveformLine.geometry.attributes.position;
+      const len = buffer.length;
+      const width = fftSize * 0.3; // was 0.2
+      for (let i = 0; i < len; i++) {
+        const x = ((i / (len - 1)) - 0.5) * width;
+        const y = (buffer[i] / maxAmplitude) * 6 * sensitivityBoost;
+        const z = 0;
+        positions.setXYZ(i, x, y, z);
+      }
+      positions.needsUpdate = true;
+    }
+
+    // Audio data overlay
+    const overlay = document.getElementById('audioDataOverlay');
+    function updateOverlay() {
+      // Display first 8 values of FFT and current maxAmplitude
+      const fftStr = Array.from(lastFFT).slice(0, 8).map(v => v.toFixed(3)).join(', ');
+      overlay.textContent =
+        `FFT:    [${fftStr}${lastFFT.length > 8 ? ', ...' : ''}]\n` +
+        `maxAmplitude: ${maxAmplitude.toFixed(4)}`;
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      updateWaterfall();
+      if (lastBuffer && lastBuffer.length) updateWaveform3D(lastBuffer);
+
+      for (let i = 0; i < lines.length; i++) {
+        lines[i].position.y = panOffsetY;
+        lines[i].position.x = panOffsetX;
+      }
+      waveformLine.position.y = waveformBaseY + panOffsetY;
+      waveformLine.position.x = waveformBaseX + panOffsetX;
+
+      camera.position.x = cameraRadius * Math.sin(rotationY) * Math.cos(rotationX);
+      camera.position.y = cameraRadius * Math.sin(rotationX) + 10;
+      camera.position.z = cameraRadius * Math.cos(rotationY) * Math.cos(rotationX);
+      camera.lookAt(0, 0, 0);
+
+      renderer.render(scene, camera);
+
+      updateOverlay();
+    }
+
+    window.onload = async () => {
+      await startAudio();
+      animate();
+    };
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'q' || e.key === 'Q') {
+        // Reset camera and pan/rotation to defaults
+        rotationY = 0;
+        rotationX = 0;
+        cameraRadius = 30;
+        panOffsetY = 0;
+        panOffsetX = 0;
+      }
+    });
+
+  </script>
+</body>
+</html>
