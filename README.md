@@ -16,3 +16,6 @@ Navigate to `http://localhost:8080` and set the input to begin visualizing (micr
 - `left-mouse hold` allows for rotation
 - `middle-mouse hold` allows for panning
 - `middle-mouse scroll` to zoom
+
+# Issues
+YMMV with what browser you use. Firefox on linux/windows works, chrome has issues, safari preffered on mac.
